@@ -17,6 +17,8 @@ import { buildDiagnosticReporter } from './diagnostics/emit';
 import type { DiagnosticsHost } from './diagnostics/host';
 import type { Resolver } from './moduleResolution';
 import { mergeTransformers } from './customTransformers';
+import cheapTransformer from '@libmedia/cheap/build/transformer'
+import path from 'path'
 
 const { DiagnosticCategory } = typescript;
 type BuilderProgram = EmitAndSemanticDiagnosticsBuilderProgram;
@@ -36,12 +38,16 @@ interface CreateProgramOptions {
   parsedOptions: ParsedCommandLine;
   /** Callback to save compiled files in memory. */
   writeFile: WriteFileCallback;
+  readFile: (origReadFile: (path: string, encoding?: string) => string | undefined, path: string, encoding?: string) => string | undefined
   /** Callback for the Typescript status reporter. */
   status: WatchStatusReporter;
   /** Function to resolve a module location */
   resolveModule: Resolver;
   /** Custom TypeScript transformers */
-  transformers?: CustomTransformerFactories | ((program: Program) => CustomTransformers);
+  transformers?: CustomTransformerFactories | ((program: Program, getProgram?: () => Program) => CustomTransformers);
+
+  updateVueFile: (fileName: string, eventKind: typescript.FileWatcherEventKind) => void
+  isVueFileExit: (fileName: string) => boolean
 }
 
 type DeferredResolve = ((value: boolean | PromiseLike<boolean>) => void) | (() => void);
@@ -140,8 +146,11 @@ function createWatchHost(
     formatHost,
     parsedOptions,
     writeFile,
+    readFile,
     status,
     resolveModule,
+    updateVueFile,
+    isVueFileExit,
     transformers
   }: CreateProgramOptions
 ): WatchCompilerHostOfFilesAndCompilerOptions<BuilderProgram> {
@@ -156,12 +165,58 @@ function createWatchHost(
     status,
     parsedOptions.projectReferences
   );
+  const origFileExists = baseHost.fileExists
+  baseHost.fileExists = (filePath) => {
+    if (/\.vue(\.setup)?\.ts$/.test(filePath)) {
+      return isVueFileExit(filePath.replace(/(\.setup)?\.ts$/, ''))
+    }
+    return origFileExists(filePath)
+  }
+  const origReadFile = baseHost.readFile
+  baseHost.readFile = function (path, encoding) {
+    return readFile(origReadFile, path, encoding)
+  }
+  const origWatchDir = baseHost.watchDirectory
+  baseHost.watchDirectory = (dirPath, callback, recursive) => {
+    return origWatchDir(dirPath, (fileName) => {
+      if (/\.vue$/.test(fileName)) {
+        if (origFileExists(fileName)) {
+          updateVueFile(fileName, typescript.FileWatcherEventKind.Changed)
+        }
+        else {
+          updateVueFile(fileName, typescript.FileWatcherEventKind.Deleted)
+        }
+        callback(fileName + '.ts')
+        callback(fileName + '.setup.ts')
+      }
+      else {
+        callback(fileName)
+      }
+    }, recursive)
+  }
+  const origWatchFile = baseHost.watchFile
+  baseHost.watchFile = (filePath, callback, pollingInterval, options) => {
+    if (/\.vue(\.setup)?\.ts$/.test(filePath)) {
+      return origWatchFile(filePath.replace(/(\.setup)?\.ts$/, ''), (fileName, eventKind, modifiedTime) => {
+        if (/\.vue\.setup\.ts$/.test(filePath)) {
+          updateVueFile(fileName, eventKind)
+        }
+        callback(fileName, eventKind, modifiedTime)
+      }, pollingInterval, options)
+    }
+    return origWatchFile(filePath, callback, pollingInterval, options)
+  }
 
   let createdTransformers: CustomTransformers | undefined;
+  let currentProgram: typescript.EmitAndSemanticDiagnosticsBuilderProgram;
+  const printer = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed });
+  // @ts-ignore
+  const writer = ts.createTextWriter ? ts.createTextWriter('\n') : null
   return {
     ...baseHost,
     /** Override the created program so an in-memory emit is used */
     afterProgramCreate(program) {
+      currentProgram = program
       const origEmit = program.emit;
       // eslint-disable-next-line no-param-reassign
       program.emit = (
@@ -171,17 +226,78 @@ function createWatchHost(
         emitOnlyDtsFiles,
         customTransformers
       ) => {
-        createdTransformers ??=
-          typeof transformers === 'function'
-            ? transformers(program.getProgram())
+        if (!createdTransformers) {
+          const before = cheapTransformer.before(program.getProgram(), () => {
+            return currentProgram.getProgram()
+          })
+          const cheapTransformers: CustomTransformerFactories = {
+            before: [
+              (context) => {
+                const f = before(context)
+                return (sourceFile) => {
+                  let transformedFile = f(sourceFile)
+                  if (/\.vue(\.setup)?\.ts$/.test(sourceFile.fileName)) {
+                    const typeCheaker = currentProgram.getProgram().getTypeChecker()
+                    const visitor = (node: typescript.Node): typescript.Node => {
+                      if (ts.isPropertyAccessExpression(node)) {
+                        const type = typeCheaker.getTypeAtLocation(node.expression)
+                        const value = typeCheaker.getTypeAtLocation(node.name)
+                        if (type.symbol?.valueDeclaration
+                          && ts.isEnumDeclaration(type.symbol.valueDeclaration)
+                          && type.symbol.valueDeclaration.modifiers?.some((m) => {
+                            return m.kind === ts.SyntaxKind.ConstKeyword
+                          })
+                          && value.isNumberLiteral()
+                        ) {
+                          return context.factory.createNumericLiteral(value.value)
+                        }
+                      }
+                      return ts.visitEachChild(node, visitor, context)
+                    }
+                    transformedFile = ts.visitEachChild(transformedFile, visitor, context)
+                    // @ts-ignore
+                    if (writer && ts.createSourceMapGenerator && printer.writeFile && parsedOptions.options.sourceMap) {
+                      // @ts-ignore
+                      const mapGenerator = ts.createSourceMapGenerator(
+                        currentProgram.getProgram(),
+                        path.basename(sourceFile.fileName),
+                        '',
+                        '',
+                        currentProgram.getProgram().getCompilerOptions()
+                      )
+                      // @ts-ignore
+                      printer.writeFile(transformedFile, writer, mapGenerator)
+                      writeFile(sourceFile.fileName.replace(/\.ts$/, '.js'), writer.getText(), false)
+                      writeFile(sourceFile.fileName.replace(/\.ts$/, '.js.map'), mapGenerator.toString(), false)
+                      writer.clear()
+                    }
+                    else {
+                      writeFile(sourceFile.fileName.replace(/\.ts$/, '.js'), printer.printFile(transformedFile), false)
+                    }
+                  }
+                  return transformedFile
+                }
+              }
+            ]
+          }
+          createdTransformers = typeof transformers === 'function'
+            ? transformers(program.getProgram(), () => {
+              return currentProgram.getProgram()
+            })
             : mergeTransformers(
                 program,
+                cheapTransformers,
                 transformers,
                 customTransformers as CustomTransformerFactories
               );
+        }
         return origEmit(
           targetSourceFile,
-          writeFile,
+          (filename, data, writeByteOrderMark) => {
+            if (!/\.vue(\.setup)?\.js$/.test(filename)) {
+              writeFile(filename, data, writeByteOrderMark)
+            }
+          },
           cancellationToken,
           emitOnlyDtsFiles,
           createdTransformers

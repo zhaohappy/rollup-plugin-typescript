@@ -37,6 +37,9 @@ export interface TypeScriptConfig {
   errors: Diagnostic[];
   wildcardDirectories?: MapLike<WatchDirectoryFlags> | undefined;
   compileOnSave?: boolean | undefined;
+  tsConfigFile?: any
+  tsConfigPath: string | undefined
+  basePath: string | undefined
 }
 
 function makeForcedCompilerOptions(noForceEmit: boolean) {
@@ -153,6 +156,23 @@ export function parseTypescriptConfig(
   const tsConfigFile = tsConfigPath ? readTsConfigFile(ts, tsConfigPath) : {};
   const basePath = tsConfigPath ? dirname(tsConfigPath) : cwd;
 
+  if (tsConfigFile.include) {
+    tsConfigFile.include.slice().forEach((p: string) => {
+      if (/\.vue/.test(p)) {
+        tsConfigFile.include.push(p + '.ts')
+        tsConfigFile.include.push(p + '.setup.ts')
+      }
+    })
+  }
+  if (tsConfigFile.exclude) {
+    tsConfigFile.exclude.slice().forEach((p: string) => {
+      if (/\.vue/.test(p)) {
+        tsConfigFile.exclude.push(p + '.ts')
+        tsConfigFile.exclude.push(p + '.setup.ts')
+      }
+    })
+  }
+
   // If compilerOptions has enums, it represents an CompilerOptions object instead of parsed JSON.
   // This determines where the data is passed to the parser.
   if (containsEnumOptions(compilerOptions)) {
@@ -200,7 +220,10 @@ export function parseTypescriptConfig(
 
   return {
     ...parsedConfig,
-    autoSetSourceMap
+    autoSetSourceMap,
+    tsConfigFile,
+    tsConfigPath,
+    basePath
   };
 }
 

@@ -22,6 +22,9 @@ import findTypescriptOutput, {
 import { preflight } from './preflight';
 import createWatchProgram, { WatchProgramHelper } from './watchProgram';
 import TSCache from './tscache';
+import fg from 'fast-glob';
+import { parse, SFCDescriptor } from '@vue/compiler-sfc';
+import { SourceMapConsumer, SourceMapGenerator } from "source-map";
 
 export default function typescript(options: RollupTypescriptOptions = {}): Plugin {
   const {
@@ -40,12 +43,48 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
   const tsCache = new TSCache(cacheDir);
   const emittedFiles = new Map<string, string>();
   const watchProgramHelper = new WatchProgramHelper();
+  const vueDescriptor = new Map<string, SFCDescriptor>() 
 
   const parsedOptions = parseTypescriptConfig(ts, tsconfig, compilerOptions, noForceEmit);
+
+  parsedOptions.options.noEmit = false
+  parsedOptions.options.verbatimModuleSyntax = false
+  parsedOptions.options.isolatedModules = false
+
   const filter = createFilter(include || '{,**/}*.(cts|mts|ts|tsx)', exclude, {
     resolve: filterRoot ?? parsedOptions.options.rootDir
   });
   parsedOptions.fileNames = parsedOptions.fileNames.filter(filter);
+
+  if (parsedOptions.tsConfigPath) {
+    const baseUrl = parsedOptions.basePath!;
+    const includePatterns: string[] = parsedOptions.tsConfigFile?.include || [];
+    const excludePatterns: string[] = parsedOptions.tsConfigFile?.exclude || [];
+    fg.sync(
+      includePatterns.map(p => path.resolve(baseUrl, p)),
+      {
+        absolute: true,
+        ignore: excludePatterns.map(p => path.resolve(baseUrl, p))
+      }
+    ).filter((fileName) => {
+      if (/\.vue$/.test(fileName) && filter(fileName)) {
+        const { descriptor } = parse(ts.sys.readFile(fileName, 'utf8')!)
+        if (descriptor.script?.lang === 'ts'
+          || descriptor.scriptSetup?.lang === 'ts'
+        ) {
+          vueDescriptor.set(fileName, descriptor)
+          if (descriptor.script?.lang === 'ts') {
+            parsedOptions.fileNames.push(fileName + '.ts')
+          }
+          if (descriptor.scriptSetup?.lang === 'ts') {
+            parsedOptions.fileNames.push(fileName + '.setup.ts')
+          }
+          return true
+        }
+      }
+      return false
+    });
+  }
 
   const formatHost = createFormattingHost(ts, parsedOptions.options);
   const resolveModule = createModuleResolver(ts, formatHost, filter);
@@ -83,6 +122,34 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
               tsCache.cacheCode(fileName, data);
             }
             emittedFiles.set(fileName, data);
+          },
+          readFile(origReadFile, fileName, encoding) {
+            if (/\.vue(\.setup)?\.ts$/.test(fileName)) {
+              const vueFileName = fileName.replace(/(\.setup)?\.ts$/, '')
+              if (vueDescriptor.has(vueFileName)) {
+                if (/\.setup\.ts$/.test(fileName)) {
+                  return vueDescriptor.get(vueFileName)!.scriptSetup!.content
+                }
+                return vueDescriptor.get(vueFileName)!.script!.content
+              }
+            }
+            return origReadFile(fileName, encoding)
+          },
+          updateVueFile(fileName, eventKind) {
+            if (eventKind === ts.FileWatcherEventKind.Deleted) {
+              vueDescriptor.delete(fileName)
+            }
+            else if (filter(fileName)) {
+              const { descriptor } = parse(ts.sys.readFile(fileName, 'utf8')!)
+              if (descriptor.script?.lang === 'ts'
+                || descriptor.scriptSetup?.lang === 'ts'
+              ) {
+                vueDescriptor.set(fileName, descriptor)
+              }
+            }
+          },
+          isVueFileExit(fileName) {
+            return vueDescriptor.has(fileName)
           },
           status(diagnostic) {
             watchProgramHelper.handleStatus(diagnostic);
@@ -158,9 +225,103 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
         parsedOptions.fileNames.push(fileName);
       }
 
-      const output = findTypescriptOutput(ts, parsedOptions, id, emittedFiles, tsCache);
+      const isVue = vueDescriptor.has(id);
 
-      return output.code != null ? (output as SourceDescription) : null;
+      if (isVue) {
+        const descriptor = vueDescriptor.get(id)!
+        let code = ''
+        const generator = new SourceMapGenerator({ file: id });
+        generator.setSourceContent(id, descriptor.source);
+
+        let lineOffset = 0;
+        let colOffset = 0;
+        let last = 0
+        let queue: {
+          start: number
+          end: number
+          replace: string,
+          line: number,
+          column: number
+          map: string
+        }[] = []
+
+        if (descriptor.script) {
+          const script = findTypescriptOutput(ts, parsedOptions, id + '.ts', emittedFiles, tsCache);
+          if (script.code != null) {
+            queue.push({
+              start: descriptor.script.loc.start.offset,
+              end: descriptor.script.loc.end.offset,
+              line: descriptor.script.loc.start.line,
+              column: descriptor.script.loc.start.column,
+              replace: script.code!,
+              map: script.map as string
+            })
+          }
+        }
+        if (descriptor.scriptSetup) {
+          const script = findTypescriptOutput(ts, parsedOptions, id + '.setup.ts', emittedFiles, tsCache);
+          if (script.code != null) {
+            queue.push({
+              start: descriptor.scriptSetup.loc.start.offset,
+              end: descriptor.scriptSetup.loc.end.offset,
+              line: descriptor.scriptSetup.loc.start.line,
+              column: descriptor.scriptSetup.loc.start.column,
+              replace: script.code!,
+              map: script.map as string
+            })
+          }
+        }
+        if (queue.length > 1) {
+          queue.sort((a, b) => a.start - b.start)
+        }
+        for (let i = 0; i < queue.length; i++) {
+          const item = queue[i]
+          let prefix = descriptor.source.slice(last, item.start) + '\n'
+          lineOffset += prefix.split("\n").length - 1
+          colOffset = prefix.includes("\n")
+            ? prefix.length - (prefix.lastIndexOf("\n") + 1)
+            : (prefix.length + colOffset)
+
+          code += prefix
+
+          if (item.map) {
+            const consumer = await new SourceMapConsumer(JSON.parse(item.map))
+            consumer.eachMapping(function (m) {
+              generator.addMapping({
+                source: id,
+                original: {
+                  line: m.originalLine + (item.line - 1),
+                  column: m.originalLine === 1 ? m.originalColumn + item.column : m.originalColumn
+                },
+                generated: {
+                  line: m.generatedLine + lineOffset,
+                  column: m.generatedLine === 1 ? m.generatedColumn + colOffset : m.generatedColumn,
+                },
+                name: m.name,
+              });
+            });
+          }
+          
+          code += item.replace
+          lineOffset += item.replace.split("\n").length - 1;
+          colOffset = item.replace.includes("\n")
+            ? item.replace.length - (item.replace.lastIndexOf("\n") + 1)
+            : (item.replace.length + colOffset)
+
+          last = item.end
+        }
+
+        code += descriptor.source.slice(last)
+
+        return {
+          code,
+          // map: generator.toString()
+        }
+      }
+      else {
+        const output = findTypescriptOutput(ts, parsedOptions, id, emittedFiles, tsCache);
+        return output.code != null ? (output as SourceDescription) : null;
+      }
     },
 
     async generateBundle(outputOptions) {
