@@ -1,4 +1,4 @@
-import type { PluginContext } from 'rollup';
+import type { PluginContext, RollupLog } from 'rollup';
 import typescript from 'typescript';
 import type {
   CustomTransformers,
@@ -168,7 +168,7 @@ function createWatchHost(
   const origFileExists = baseHost.fileExists
   baseHost.fileExists = (filePath) => {
     if (/\.vue(\.setup)?\.ts$/.test(filePath)) {
-      return isVueFileExit(filePath.replace(/(\.setup)?\.ts$/, ''))
+      return isVueFileExit(filePath)
     }
     return origFileExists(filePath)
   }
@@ -186,8 +186,12 @@ function createWatchHost(
         else {
           updateVueFile(fileName, typescript.FileWatcherEventKind.Deleted)
         }
-        callback(fileName + '.ts')
-        callback(fileName + '.setup.ts')
+        if (isVueFileExit(fileName + '.ts')) {
+          callback(fileName + '.ts')
+        }
+        if (isVueFileExit(fileName + '.setup.ts')) {
+          callback(fileName + '.setup.ts')
+        }
       }
       else {
         callback(fileName)
@@ -195,13 +199,28 @@ function createWatchHost(
     }, recursive)
   }
   const origWatchFile = baseHost.watchFile
+  const vueFileHasWatcher = new Map<string, boolean>()
+  const fileHasWatcher = new Map<string, boolean>()
   baseHost.watchFile = (filePath, callback, pollingInterval, options) => {
     if (/\.vue(\.setup)?\.ts$/.test(filePath)) {
-      return origWatchFile(filePath.replace(/(\.setup)?\.ts$/, ''), (fileName, eventKind, modifiedTime) => {
-        if (/\.vue\.setup\.ts$/.test(filePath)) {
+      const vueFileName = filePath.replace(/(\.setup)?\.ts$/, '')
+      const needUpdate = !vueFileHasWatcher.has(vueFileName)
+      vueFileHasWatcher.set(vueFileName, true)
+      fileHasWatcher.set(filePath, true)
+      return origWatchFile(vueFileName, (fileName, eventKind, modifiedTime) => {
+        if (needUpdate) {
           updateVueFile(fileName, eventKind)
+          if (eventKind === typescript.FileWatcherEventKind.Deleted) {
+            vueFileHasWatcher.delete(fileName)
+          }
         }
-        callback(fileName, eventKind, modifiedTime)
+        if (isVueFileExit(filePath)) {
+          callback(filePath, eventKind, modifiedTime)
+        }
+        else {
+          callback(filePath, typescript.FileWatcherEventKind.Deleted, modifiedTime)
+          fileHasWatcher.delete(filePath)
+        }
       }, pollingInterval, options)
     }
     return origWatchFile(filePath, callback, pollingInterval, options)
@@ -227,7 +246,21 @@ function createWatchHost(
         customTransformers
       ) => {
         if (!createdTransformers) {
-          const before = cheapTransformer.before(program.getProgram(), () => {
+          const before = cheapTransformer.before(program.getProgram(), {
+            reportError(error) {
+              const warning: RollupLog = {
+                pluginCode: `TS${error.code}`,
+                message: `@libmedia/rollup-plugin-typescript ${error.code}: ${error.message}`,
+                loc: {
+                  column: error.loc.start.column,
+                  line: error.loc.start.line,
+                  file: error.file
+                }
+              }
+              console.error('\x1b[31m%s\x1b[0m', warning.message)
+              // context.error(warning)
+            },
+          }, () => {
             return currentProgram.getProgram()
           })
           const cheapTransformers: CustomTransformerFactories = {
@@ -238,7 +271,11 @@ function createWatchHost(
                   let transformedFile = f(sourceFile)
                   if (/\.vue(\.setup)?\.ts$/.test(sourceFile.fileName)) {
                     const typeCheaker = currentProgram.getProgram().getTypeChecker()
-                    const visitor = (node: typescript.Node): typescript.Node => {
+                    const used = new Set<string>()
+                    const constEnumVisitor = (node: typescript.Node): typescript.Node => {
+                      if (ts.isImportDeclaration(node)) {
+                        return node
+                      }
                       if (ts.isPropertyAccessExpression(node)) {
                         const type = typeCheaker.getTypeAtLocation(node.expression)
                         const value = typeCheaker.getTypeAtLocation(node.name)
@@ -252,9 +289,48 @@ function createWatchHost(
                           return context.factory.createNumericLiteral(value.value)
                         }
                       }
-                      return ts.visitEachChild(node, visitor, context)
+                      if (ts.isIdentifier(node)) {
+                        const sym = typeCheaker.getSymbolAtLocation(node)
+                        if (sym && sym.valueDeclaration) {
+                          if (sym.valueDeclaration.getSourceFile() !== sourceFile) {
+                            used.add(node.text)
+                          }
+                        }
+                        else {
+                          used.add(node.text)
+                        }
+                      }
+                      return ts.visitEachChild(node, constEnumVisitor, context)
                     }
-                    transformedFile = ts.visitEachChild(transformedFile, visitor, context)
+                    const importVisitor = (node: typescript.Node): typescript.Node | undefined => {
+                      if (ts.isImportDeclaration(node) && node.importClause) {
+                        const clause = node.importClause;
+
+                        // 默认导入
+                        if (clause.name && !used.has(clause.name.text)) {
+                          return undefined
+                        }
+
+                        // 解构导入 { a, b }
+                        if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+                          const newElements = clause.namedBindings.elements.filter(
+                            (el) => used.has(el.name.text)
+                          );
+                          if (newElements.length === 0) {
+                            return undefined
+                          }
+                        }
+                        else if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+                          // import * as ns from "xx"
+                          if (!used.has(clause.namedBindings.name.text)) {
+                            return undefined
+                          }
+                        }
+                      }
+                      return node
+                    }
+                    transformedFile = ts.visitEachChild(transformedFile, constEnumVisitor, context)
+                    transformedFile = ts.visitEachChild(transformedFile, importVisitor, context)
                     // @ts-ignore
                     if (writer && ts.createSourceMapGenerator && printer.writeFile && parsedOptions.options.sourceMap) {
                       // @ts-ignore

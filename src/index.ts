@@ -24,7 +24,7 @@ import createWatchProgram, { WatchProgramHelper } from './watchProgram';
 import TSCache from './tscache';
 import fg from 'fast-glob';
 import { parse, SFCDescriptor } from '@vue/compiler-sfc';
-import { SourceMapConsumer, SourceMapGenerator } from "source-map";
+import { RawSourceMap, SourceMapConsumer, SourceMapGenerator } from "source-map";
 
 export default function typescript(options: RollupTypescriptOptions = {}): Plugin {
   const {
@@ -69,18 +69,10 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
     ).filter((fileName) => {
       if (/\.vue$/.test(fileName) && filter(fileName)) {
         const { descriptor } = parse(ts.sys.readFile(fileName, 'utf8')!)
-        if (descriptor.script?.lang === 'ts'
-          || descriptor.scriptSetup?.lang === 'ts'
-        ) {
-          vueDescriptor.set(fileName, descriptor)
-          if (descriptor.script?.lang === 'ts') {
-            parsedOptions.fileNames.push(fileName + '.ts')
-          }
-          if (descriptor.scriptSetup?.lang === 'ts') {
-            parsedOptions.fileNames.push(fileName + '.setup.ts')
-          }
-          return true
-        }
+        vueDescriptor.set(fileName, descriptor)
+        parsedOptions.fileNames.push(fileName + '.ts')
+        parsedOptions.fileNames.push(fileName + '.setup.ts')
+        return true
       }
       return false
     });
@@ -90,6 +82,7 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
   const resolveModule = createModuleResolver(ts, formatHost, filter);
 
   let program: Watch<unknown> | null = null;
+  let enableSourceMap: boolean = true
 
   return {
     name: 'typescript',
@@ -127,10 +120,20 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
             if (/\.vue(\.setup)?\.ts$/.test(fileName)) {
               const vueFileName = fileName.replace(/(\.setup)?\.ts$/, '')
               if (vueDescriptor.has(vueFileName)) {
-                if (/\.setup\.ts$/.test(fileName)) {
-                  return vueDescriptor.get(vueFileName)!.scriptSetup!.content
+                const descriptor = vueDescriptor.get(vueFileName)!
+                let isTs = descriptor.script?.lang === 'ts' || descriptor.scriptSetup?.lang === 'ts'
+                if (isTs) {
+                  if (/\.setup\.ts$/.test(fileName)) {
+                    if (descriptor.scriptSetup) {
+                      return vueDescriptor.get(vueFileName)!.scriptSetup!.content
+                    }
+                    return ''
+                  }
+                  else if (descriptor.script) {
+                    return vueDescriptor.get(vueFileName)!.script!.content
+                  }
                 }
-                return vueDescriptor.get(vueFileName)!.script!.content
+                return ''
               }
             }
             return origReadFile(fileName, encoding)
@@ -141,15 +144,15 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
             }
             else if (filter(fileName)) {
               const { descriptor } = parse(ts.sys.readFile(fileName, 'utf8')!)
-              if (descriptor.script?.lang === 'ts'
-                || descriptor.scriptSetup?.lang === 'ts'
-              ) {
-                vueDescriptor.set(fileName, descriptor)
-              }
+              vueDescriptor.set(fileName, descriptor)
             }
           },
           isVueFileExit(fileName) {
-            return vueDescriptor.has(fileName)
+            const vueFileName = fileName.replace(/(\.setup)?\.ts$/, '')
+            if (vueDescriptor.has(vueFileName)) {
+              return true
+            }
+            return false
           },
           status(diagnostic) {
             watchProgramHelper.handleStatus(diagnostic);
@@ -174,6 +177,7 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
     },
 
     renderStart(outputOptions) {
+      enableSourceMap = parsedOptions.options.sourceMap === true && !!outputOptions.sourcemap
       validateSourceMap(this, parsedOptions.options, outputOptions, parsedOptions.autoSetSourceMap);
       validatePaths(this, parsedOptions.options, outputOptions);
     },
@@ -220,10 +224,36 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
       await watchProgramHelper.wait();
 
       const fileName = normalizePath(id);
-      if (!parsedOptions.fileNames.includes(fileName)) {
-        // Discovered new file that was not known when originally parsing the TypeScript config
-        parsedOptions.fileNames.push(fileName);
+      if (!parsedOptions.fileNames.includes(fileName)
+        && (!/\.vue$/.test(fileName)
+          || !parsedOptions.fileNames.includes(fileName + '.ts')
+        )
+      ) {
+        if (/\.vue$/.test(fileName)) {
+          parsedOptions.fileNames.push(fileName + '.ts')
+          parsedOptions.fileNames.push(fileName + '.setup.ts')
+        }
+        else {
+          parsedOptions.fileNames.push(fileName);
+        }
       }
+
+      const isVue = vueDescriptor.has(id);
+
+      if (isVue) {
+        const descriptor = vueDescriptor.get(id)!
+        return {
+          code: descriptor.source
+        }
+      }
+      else {
+        const output = findTypescriptOutput(ts, parsedOptions, id, emittedFiles, tsCache);
+        return output.code != null ? (output as SourceDescription) : null;
+      }
+    },
+
+    async transform(_, id) {
+      if (!filter(id)) return null;
 
       const isVue = vueDescriptor.has(id);
 
@@ -239,37 +269,49 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
         let queue: {
           start: number
           end: number
-          replace: string,
-          line: number,
-          column: number
-          map: string
+          replace: string
+          line: number
+          map: string | RawSourceMap
+          generatedLineOffset: number
         }[] = []
 
-        if (descriptor.script) {
+        let isTs = descriptor.script?.lang === 'ts' || descriptor.scriptSetup?.lang === 'ts'
+
+        if (isTs && descriptor.script) {
           const script = findTypescriptOutput(ts, parsedOptions, id + '.ts', emittedFiles, tsCache);
           if (script.code != null) {
             queue.push({
               start: descriptor.script.loc.start.offset,
               end: descriptor.script.loc.end.offset,
               line: descriptor.script.loc.start.line,
-              column: descriptor.script.loc.start.column,
               replace: script.code!,
-              map: script.map as string
+              map: script.map as string,
+              generatedLineOffset: 0
             })
           }
         }
-        if (descriptor.scriptSetup) {
+        if (isTs && descriptor.scriptSetup) {
           const script = findTypescriptOutput(ts, parsedOptions, id + '.setup.ts', emittedFiles, tsCache);
           if (script.code != null) {
             queue.push({
               start: descriptor.scriptSetup.loc.start.offset,
               end: descriptor.scriptSetup.loc.end.offset,
               line: descriptor.scriptSetup.loc.start.line,
-              column: descriptor.scriptSetup.loc.start.column,
               replace: script.code!,
-              map: script.map as string
+              map: script.map as string,
+              generatedLineOffset: 0
             })
           }
+        }
+        if (descriptor.template) {
+          queue.push({
+            start: descriptor.template.loc.start.offset,
+            end: descriptor.template.loc.end.offset,
+            line: 1,
+            replace: descriptor.template.content!,
+            map: descriptor.template.map as unknown as RawSourceMap,
+            generatedLineOffset: 0
+          })
         }
         if (queue.length > 1) {
           queue.sort((a, b) => a.start - b.start)
@@ -284,17 +326,17 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
 
           code += prefix
 
-          if (item.map) {
-            const consumer = await new SourceMapConsumer(JSON.parse(item.map))
+          if (item.map && enableSourceMap) {
+            const consumer = await new SourceMapConsumer(typeof item.map === 'string' ? JSON.parse(item.map) : item.map)
             consumer.eachMapping(function (m) {
               generator.addMapping({
                 source: id,
                 original: {
                   line: m.originalLine + (item.line - 1),
-                  column: m.originalLine === 1 ? m.originalColumn + item.column : m.originalColumn
+                  column: m.originalColumn
                 },
                 generated: {
-                  line: m.generatedLine + lineOffset,
+                  line: m.generatedLine + lineOffset + item.generatedLineOffset,
                   column: m.generatedLine === 1 ? m.generatedColumn + colOffset : m.generatedColumn,
                 },
                 name: m.name,
@@ -315,13 +357,10 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
 
         return {
           code,
-          // map: generator.toString()
+          map: generator.toString()
         }
       }
-      else {
-        const output = findTypescriptOutput(ts, parsedOptions, id, emittedFiles, tsCache);
-        return output.code != null ? (output as SourceDescription) : null;
-      }
+      return null
     },
 
     async generateBundle(outputOptions) {

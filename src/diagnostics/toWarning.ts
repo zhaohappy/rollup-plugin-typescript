@@ -27,7 +27,7 @@ export default function diagnosticToWarning(
   // Build a Rollup warning object from the diagnostics object.
   const warning: RollupLog = {
     pluginCode,
-    message: `@rollup/plugin-typescript ${pluginCode}: ${message}`
+    message: `@libmedia/rollup-plugin-typescript ${pluginCode}: ${message}`
   };
 
   if (diagnostic.file) {
