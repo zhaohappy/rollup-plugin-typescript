@@ -21,11 +21,11 @@ export function validateSourceMap(
 ) {
   if (compilerOptions.sourceMap && !outputOptions.sourcemap && !autoSetSourceMap) {
     context.warn(
-      `@rollup/plugin-typescript: Rollup 'sourcemap' option must be set to generate source maps.`
+      `@libmedia/rollup-plugin-typescript: Rollup 'sourcemap' option must be set to generate source maps.`
     );
   } else if (!compilerOptions.sourceMap && outputOptions.sourcemap) {
     context.warn(
-      `@rollup/plugin-typescript: Typescript 'sourceMap' compiler option must be set to generate source maps.`
+      `@libmedia/rollup-plugin-typescript: Typescript 'sourceMap' compiler option must be set to generate source maps.`
     );
   }
 }
@@ -43,11 +43,11 @@ export function validatePaths(
 ) {
   if (compilerOptions.out) {
     context.error(
-      `@rollup/plugin-typescript: Deprecated Typescript compiler option 'out' is not supported. Use 'outDir' instead.`
+      `@libmedia/rollup-plugin-typescript: Deprecated Typescript compiler option 'out' is not supported. Use 'outDir' instead.`
     );
   } else if (compilerOptions.outFile) {
     context.error(
-      `@rollup/plugin-typescript: Typescript compiler option 'outFile' is not supported. Use 'outDir' instead.`
+      `@libmedia/rollup-plugin-typescript: Typescript compiler option 'outFile' is not supported. Use 'outDir' instead.`
     );
   }
 
@@ -62,21 +62,21 @@ export function validatePaths(
         const fromRollupDirToTs = relative(outputDir, compilerOptions[dirProperty]!);
         if (fromRollupDirToTs.startsWith('..')) {
           context.error(
-            `@rollup/plugin-typescript: Path of Typescript compiler option '${dirProperty}' must be located inside Rollup 'dir' option.`
+            `@libmedia/rollup-plugin-typescript: Path of Typescript compiler option '${dirProperty}' must be located inside Rollup 'dir' option.`
           );
         }
       } else if (dirProperty === 'outDir') {
         const fromTsDirToRollup = relative(compilerOptions[dirProperty]!, outputDir);
         if (fromTsDirToRollup.startsWith('..')) {
           context.error(
-            `@rollup/plugin-typescript: Path of Typescript compiler option '${dirProperty}' must be located inside the same directory as the Rollup 'file' option.`
+            `@libmedia/rollup-plugin-typescript: Path of Typescript compiler option '${dirProperty}' must be located inside the same directory as the Rollup 'file' option.`
           );
         }
       } else {
         const fromTsDirToRollup = relative(outputDir, compilerOptions[dirProperty]!);
         if (fromTsDirToRollup.startsWith('..')) {
           context.error(
-            `@rollup/plugin-typescript: Path of Typescript compiler option '${dirProperty}' must be located inside the same directory as the Rollup 'file' option.`
+            `@libmedia/rollup-plugin-typescript: Path of Typescript compiler option '${dirProperty}' must be located inside the same directory as the Rollup 'file' option.`
           );
         }
       }
@@ -86,7 +86,7 @@ export function validatePaths(
   if (compilerOptions.declaration || compilerOptions.declarationMap || compilerOptions.composite) {
     if (DIRECTORY_PROPS.every((dirProperty) => !compilerOptions[dirProperty])) {
       context.error(
-        `@rollup/plugin-typescript: You are using one of Typescript's compiler options 'declaration', 'declarationMap' or 'composite'. ` +
+        `@libmedia/rollup-plugin-typescript: You are using one of Typescript's compiler options 'declaration', 'declarationMap' or 'composite'. ` +
           `In this case 'outDir' or 'declarationDir' must be specified to generate declaration files.`
       );
     }

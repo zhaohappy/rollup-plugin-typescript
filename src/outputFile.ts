@@ -114,7 +114,7 @@ export async function emitFile(
   // legal paths do not start with . nor .. : https://github.com/rollup/rollup/issues/3507#issuecomment-616495912
   if (relativePath.startsWith('..')) {
     if (outputToFilesystem == null) {
-      context.warn(`@rollup/plugin-typescript: outputToFilesystem option is defaulting to true.`);
+      context.warn(`@libmedia/rollup-plugin-typescript: outputToFilesystem option is defaulting to true.`);
     }
     if (outputToFilesystem !== false) {
       await fs.mkdir(path.dirname(normalizedFilePath), { recursive: true });

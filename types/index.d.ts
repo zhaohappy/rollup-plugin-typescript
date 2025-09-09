@@ -28,7 +28,7 @@ export type CustomTransformerFactories = {
 interface ProgramTransformerFactory<T extends TransformerStage> {
   type: 'program';
 
-  factory(program: Program): StagedTransformerFactory<T>;
+  factory(program: Program, getProgram: () => Program): StagedTransformerFactory<T>;
 }
 
 interface TypeCheckerTransformerFactory<T extends TransformerStage> {

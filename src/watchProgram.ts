@@ -362,6 +362,9 @@ function createWatchHost(
             })
             : mergeTransformers(
                 program,
+                () => {
+                  return currentProgram.getProgram()
+                },
                 cheapTransformers,
                 transformers,
                 customTransformers as CustomTransformerFactories

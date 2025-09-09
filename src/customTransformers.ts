@@ -6,6 +6,7 @@ import type { CustomTransformerFactories, TransformerStage, TransformerFactory }
  */
 export function mergeTransformers(
   builder: BuilderProgram,
+  getProgram: () => Program,
   ...input: Array<CustomTransformerFactories | undefined>
 ): CustomTransformers {
   // List of all transformer stages
@@ -44,7 +45,7 @@ export function mergeTransformers(
             if (transformer.type === 'program') {
               program = program || builder.getProgram();
 
-              factory = transformer.factory(program);
+              factory = transformer.factory(program, getProgram);
             } else {
               program = program || builder.getProgram();
               typeChecker = typeChecker || program.getTypeChecker();
