@@ -61,10 +61,10 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
     const includePatterns: string[] = parsedOptions.tsConfigFile?.include || [];
     const excludePatterns: string[] = parsedOptions.tsConfigFile?.exclude || [];
     fg.sync(
-      includePatterns.map(p => path.resolve(baseUrl, p)),
+      includePatterns.map(p => normalizePath(path.resolve(baseUrl, p))),
       {
         absolute: true,
-        ignore: excludePatterns.map(p => path.resolve(baseUrl, p))
+        ignore: excludePatterns.map(p => normalizePath(path.resolve(baseUrl, p)))
       }
     ).filter((fileName) => {
       if (/\.vue$/.test(fileName) && filter(fileName)) {
