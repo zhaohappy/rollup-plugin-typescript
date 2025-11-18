@@ -17,7 +17,7 @@ import { buildDiagnosticReporter } from './diagnostics/emit';
 import type { DiagnosticsHost } from './diagnostics/host';
 import type { Resolver } from './moduleResolution';
 import { mergeTransformers } from './customTransformers';
-import cheapTransformer from '@libmedia/cheap/build/transformer'
+import * as cheapTransformer from '@libmedia/cheap/build/transformer'
 import path from 'path'
 
 const { DiagnosticCategory } = typescript;
@@ -246,8 +246,13 @@ function createWatchHost(
         customTransformers
       ) => {
         if (!createdTransformers) {
-          const before = cheapTransformer.before(program.getProgram(), {
-            reportError(error) {
+          // @ts-ignore
+          let beforeFactory = cheapTransformer.default ?
+          // @ts-ignore
+            cheapTransformer.default.before
+            : cheapTransformer.before
+          const before = beforeFactory(program.getProgram(), {
+            reportError(error: any) {
               const warning: RollupLog = {
                 pluginCode: `TS${error.code}`,
                 message: `@libmedia/rollup-plugin-typescript ${error.code}: ${error.message}`,
