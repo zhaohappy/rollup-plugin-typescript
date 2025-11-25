@@ -218,6 +218,7 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
     },
 
     async load(id) {
+      id = id.split(`?`, 2)[0]
       if (!filter(id)) return null;
 
       this.addWatchFile(id);
@@ -253,6 +254,7 @@ export default function typescript(options: RollupTypescriptOptions = {}): Plugi
     },
 
     async transform(_, id) {
+      id = id.split(`?`, 2)[0]
       if (!filter(id)) return null;
 
       const isVue = vueDescriptor.has(id);
