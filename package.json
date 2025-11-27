@@ -1,6 +1,6 @@
 {
   "name": "@libmedia/rollup-plugin-typescript",
-  "version": "12.2.4",
+  "version": "12.2.5",
   "publishConfig": {
     "access": "public"
   },
